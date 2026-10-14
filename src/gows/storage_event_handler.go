@@ -118,7 +118,7 @@ func isRealMessage(event *events.Message) bool {
 
 func (st *StorageEventHandler) handleEvent(event interface{}) {
 	switch event.(type) {
-	case *events.LabelEdit, *events.LabelAssociationChat, *events.AppStateSyncComplete:
+	case *events.LabelEdit, *events.LabelAssociationChat:
 		// Keep whatsmeow's order - the last change per label/chat wins
 		// In case of "add" then "delete" and similar events for 1 entity
 		st.processEvent(event)

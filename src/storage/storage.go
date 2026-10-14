@@ -16,6 +16,7 @@ type Storage struct {
 	Labels               LabelStorage
 	LabelAssociations    LabelAssociationStorage
 	Lidmap               LidmapStorage
+	ChatDeletions        ChatDeletionStorage
 }
 
 type MessageStorage interface {
@@ -27,7 +28,8 @@ type MessageStorage interface {
 	GetMessage(id types.MessageID) (*StoredMessage, error)
 	// GetMessageWithRetries fetches a message by ID with retries.
 	GetMessageWithRetries(id types.MessageID) (*StoredMessage, error)
-	DeleteChatMessages(jid types.JID, deleteBefore time.Time) error
+	// DeleteChatMessages deletes the chat messages sent before deleteBefore, returns their ids
+	DeleteChatMessages(jid types.JID, deleteBefore time.Time) ([]types.MessageID, error)
 	DeleteMessage(id types.MessageID) error
 }
 
@@ -76,4 +78,22 @@ type LidmapStorage interface {
 	GetAllLidMap() ([]LidmapEntry, error)
 	// GetLidCount returns the count of lids in the database
 	GetLidCount() (int, error)
+}
+
+// PendingChatDeletion is a deleted chat the client has not confirmed yet.
+type PendingChatDeletion struct {
+	ID        string
+	CreatedAt time.Time
+	// Data is the event as sent to the client (JSON)
+	Data []byte
+}
+
+// ChatDeletionStorage keeps the deleted chats until the client confirms them
+type ChatDeletionStorage interface {
+	AddChatDeletion(deletion *PendingChatDeletion) error
+	// GetChatDeletions returns the pending deletions, oldest first
+	GetChatDeletions() ([]*PendingChatDeletion, error)
+	DeleteChatDeletion(id string) error
+	// DeleteChatDeletionsBefore forgets the deletions added before the time
+	DeleteChatDeletionsBefore(before time.Time) (int64, error)
 }

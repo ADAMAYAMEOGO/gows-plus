@@ -77,5 +77,6 @@ func BuildStorage(container *sqlstorage.GContainer, gows *GoWS, cfg StorageConfi
 	}
 
 	st.Lidmap = container.NewLidmapStorage()
+	st.ChatDeletions = container.NewChatDeletionStorage()
 	return st
 }

@@ -39,8 +39,8 @@ func (s MessageStorage) GetMessageWithRetries(id types.MessageID) (*storage.Stor
 	return nil, storage.StorageDisabled("messages")
 }
 
-func (s MessageStorage) DeleteChatMessages(jid types.JID, deleteBefore time.Time) error {
-	return nil
+func (s MessageStorage) DeleteChatMessages(jid types.JID, deleteBefore time.Time) ([]types.MessageID, error) {
+	return nil, nil
 }
 
 func (s MessageStorage) DeleteMessage(id types.MessageID) error {

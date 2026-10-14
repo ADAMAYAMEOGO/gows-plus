@@ -1,13 +1,20 @@
 package gows
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"runtime/debug"
+	"sort"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/avast/retry-go"
 	"github.com/devlikeapro/gows/storage"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -21,6 +28,14 @@ type StorageEventHandler struct {
 	storage *storage.Storage
 	// ignoreJids specifies which types of JIDs should be ignored when processing events.
 	ignoreJids *IgnoreJidsConfig
+	// lids replaces the client LID store (tests).
+	lids store.LIDStore
+	// emit sends an event to the event stream.
+	emit func(event interface{})
+	// deleteChatLock handles the deleted chats one at a time
+	deleteChatLock sync.Mutex
+	// recentDeletedChats are the deletions emitted lately
+	recentDeletedChats recentKeys
 }
 
 func (st *StorageEventHandler) shouldIgnoreJID(jid types.JID) bool {
@@ -396,16 +411,168 @@ func (st *StorageEventHandler) handleGroupInfo(info *events.GroupInfo) {
 	return
 }
 
+// handleDeleteChat clears a deleted chat (messages up to the deletion, ephemeral setting) under both
+// addresses of a direct chat, then emits ChatDeletedEvent - once for the two mutations of one deletion.
 func (st *StorageEventHandler) handleDeleteChat(event *events.DeleteChat) {
-	err := st.storage.Messages.DeleteChatMessages(event.JID, event.Timestamp)
-	if err != nil {
-		st.log.Errorf("Error deleting chat messages %v: %v", event.JID, err)
+	if event.JID.IsEmpty() {
+		return
 	}
-	err = st.storage.ChatEphemeralSetting.DeleteChatEphemeralSetting(event.JID, event.Timestamp)
-	if err != nil {
-		st.log.Errorf("Error deleting chat ephemeral setting %v: %v", event.JID, err)
+	st.deleteChatLock.Lock()
+	defer st.deleteChatLock.Unlock()
+
+	deleteBefore := deleteChatBefore(event, time.Now())
+	altJID := st.altChatJID(event.JID)
+	deleted := make([]types.MessageID, 0)
+	failures := make([]string, 0)
+	for _, jid := range []types.JID{event.JID, altJID} {
+		if jid.IsEmpty() {
+			continue
+		}
+		var ids []types.MessageID
+		err := retryDeleteChat(func() (err error) {
+			ids, err = st.storage.Messages.DeleteChatMessages(jid, deleteBefore)
+			return err
+		})
+		if err != nil {
+			st.log.Errorf("Error deleting chat messages %v: %v", jid, err)
+			failures = append(failures, fmt.Sprintf("messages of %v: %v", jid, err))
+		}
+		deleted = append(deleted, ids...)
+		err = retryDeleteChat(func() error {
+			return st.storage.ChatEphemeralSetting.DeleteChatEphemeralSetting(jid, deleteBefore)
+		})
+		if err != nil {
+			st.log.Errorf("Error deleting chat ephemeral setting %v: %v", jid, err)
+			failures = append(failures, fmt.Sprintf("ephemeral setting of %v: %v", jid, err))
+		}
 	}
-	st.log.Debugf("Deleted chat %v", event.JID)
+	st.log.Debugf("Deleted chat %v (%v): %d messages before %v", event.JID, altJID, len(deleted), deleteBefore)
+
+	key := deletedChatKey(event, altJID, deleteBefore)
+	if len(deleted) == 0 && len(failures) == 0 && st.recentDeletedChats.seen(key) {
+		st.log.Debugf("Chat %v already deleted with %v, not emitted again", event.JID, altJID)
+		return
+	}
+	st.recentDeletedChats.add(key)
+	chatDeleted := &ChatDeletedEvent{
+		JID:           event.JID,
+		AltJID:        altJID,
+		Timestamp:     event.Timestamp,
+		DeletedBefore: deleteBefore,
+		DeleteMedia:   event.DeleteMedia,
+		FromFullSync:  event.FromFullSync,
+		MessageIDs:    deleted,
+		Error:         strings.Join(failures, "; "),
+	}
+	st.keepChatDeletion(chatDeleted)
+	st.emitEvent(chatDeleted)
+}
+
+// retryDeleteChat retries a cleanup step: the mutation is not delivered again
+func retryDeleteChat(step func() error) error {
+	return retry.Do(
+		step,
+		retry.Attempts(4),
+		retry.Delay(deleteChatRetryDelay),
+		retry.LastErrorOnly(true),
+	)
+}
+
+// deleteChatRetryDelay is the base wait between two attempts of a cleanup step.
+var deleteChatRetryDelay = 250 * time.Millisecond
+
+// deletedChatKey identifies one deletion of a chat, whichever address it came for
+func deletedChatKey(event *events.DeleteChat, altJID types.JID, deleteBefore time.Time) string {
+	jids := []string{event.JID.String(), altJID.String()}
+	sort.Strings(jids)
+	return fmt.Sprintf("%s|%s|%d|%d", jids[0], jids[1], event.Timestamp.UnixMilli(), deleteBefore.UnixNano())
+}
+
+// recentKeys remembers keys for a while.
+type recentKeys struct {
+	lock sync.Mutex
+	keys map[string]time.Time
+}
+
+const recentDeletedChatTTL = 10 * time.Minute
+
+func (r *recentKeys) seen(key string) bool {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	at, ok := r.keys[key]
+	return ok && time.Since(at) < recentDeletedChatTTL
+}
+
+func (r *recentKeys) add(key string) {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	if r.keys == nil {
+		r.keys = make(map[string]time.Time)
+	}
+	for k, at := range r.keys {
+		if time.Since(at) >= recentDeletedChatTTL {
+			delete(r.keys, k)
+		}
+	}
+	r.keys[key] = time.Now()
+}
+
+// deleteChatClockSkew is how far after the deletion its range may end (device and server clocks differ)
+const deleteChatClockSkew = time.Minute
+
+// deleteChatBefore returns the bound of the deleted messages: just after the last second of the range,
+// or the deletion time without a range or when the range ends after it (ms timestamp, clock ahead)
+func deleteChatBefore(event *events.DeleteChat, now time.Time) time.Time {
+	deletedAt := event.Timestamp
+	if deletedAt.IsZero() || deletedAt.After(now) {
+		deletedAt = now
+	}
+	messageRange := event.Action.GetMessageRange()
+	last := max(messageRange.GetLastMessageTimestamp(), messageRange.GetLastSystemMessageTimestamp())
+	for _, message := range messageRange.GetMessages() {
+		last = max(last, message.GetTimestamp())
+	}
+	if last <= 0 {
+		return deletedAt
+	}
+	if last >= deletedAt.Add(deleteChatClockSkew).Unix() {
+		return deletedAt
+	}
+	return time.Unix(last+1, 0)
+}
+
+// altChatJID returns the other address of a direct chat, empty on lookup error
+func (st *StorageEventHandler) altChatJID(jid types.JID) types.JID {
+	ctx := context.Background()
+	if st.gows != nil {
+		ctx = st.gows.Context
+	}
+	var valid func(lid, pn types.JID) bool
+	if st.gows != nil {
+		valid = st.gows.validLIDPNPair
+	}
+	alt, err := altChatJID(ctx, st.lidStore(), valid, st.log, jid)
+	if err != nil {
+		st.log.Warnf("Failed to get the other address of chat %v: %v", jid, err)
+		return types.EmptyJID
+	}
+	return alt
+}
+
+func (st *StorageEventHandler) lidStore() store.LIDStore {
+	if st.lids != nil {
+		return st.lids
+	}
+	if st.gows == nil || st.gows.Client == nil || st.gows.Store == nil {
+		return nil
+	}
+	return st.gows.Store.LIDs
+}
+
+func (st *StorageEventHandler) emitEvent(event interface{}) {
+	if st.emit != nil {
+		st.emit(event)
+	}
 }
 
 func (st *StorageEventHandler) handleLabelEdit(event *events.LabelEdit) {

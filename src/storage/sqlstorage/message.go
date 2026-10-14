@@ -113,12 +113,20 @@ func (s SqlMessageStore) GetMessageWithRetries(id types.MessageID) (msg *storage
 	return msg, err
 }
 
-func (s SqlMessageStore) DeleteChatMessages(jid types.JID, deleteBefore time.Time) error {
+func (s SqlMessageStore) DeleteChatMessages(jid types.JID, deleteBefore time.Time) ([]types.MessageID, error) {
 	conditions := []sq.Sqlizer{
 		sq.Eq{"jid": jid},
 		sq.Lt{"timestamp": deleteBefore},
 	}
-	return s.DeleteBy(conditions)
+	ids, err := s.DeleteByReturning(conditions, "id")
+	if err != nil {
+		return nil, err
+	}
+	deleted := make([]types.MessageID, len(ids))
+	for i, id := range ids {
+		deleted[i] = types.MessageID(id)
+	}
+	return deleted, nil
 }
 
 func (s SqlMessageStore) DeleteMessage(id types.MessageID) error {

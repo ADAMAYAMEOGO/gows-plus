@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/devlikeapro/gows/gows"
 	gowsLog "github.com/devlikeapro/gows/log"
 	"github.com/google/uuid"
 )
@@ -74,5 +75,21 @@ func TestSendEventToAllListenersDoesNotBlockOnPoisonedListener(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("SendEventToAllListeners blocked on a poisoned listener")
+	}
+}
+
+// Pending deleted chats go to a listener that just connected, without ever
+// blocking on a full listener.
+func TestPushPendingEventsNeverBlocks(t *testing.T) {
+	listener := &eventListener{events: make(chan interface{}, 2), poisoned: make(chan struct{})}
+	events := []*gows.ChatDeletedEvent{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+
+	pushPendingEvents(listener, events)
+
+	if len(listener.events) != 2 {
+		t.Fatalf("expected the first two events, got %d", len(listener.events))
+	}
+	if first := (<-listener.events).(*gows.ChatDeletedEvent); first.ID != "a" {
+		t.Fatalf("expected the oldest first, got %v", first.ID)
 	}
 }

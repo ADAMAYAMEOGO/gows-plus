@@ -439,6 +439,7 @@ func BuildSession(
 		log:        gows.Log.Sub("Storage"),
 		storage:    gows.Storage,
 		ignoreJids: ignoreJids,
+		emit:       gows.emitEvent,
 	}
 	gows.GetMessageForRetry = gows.storageEventHandler.GetMessageForRetry
 	gows.BackgroundEventCtx = gows.Context

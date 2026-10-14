@@ -158,6 +158,24 @@ func (kv *EntityRepository[Entity]) DeleteBy(conditions []sq.Sqlizer) error {
 	return err
 }
 
+// DeleteByReturning deletes the matching rows and returns their column (PostgreSQL, SQLite 3.35+)
+func (kv *EntityRepository[Entity]) DeleteByReturning(conditions []sq.Sqlizer, column string) ([]string, error) {
+	sql := sq.Delete(kv.table.Name)
+	for _, cond := range conditions {
+		sql = sql.Where(cond)
+	}
+	sql = sql.Suffix("RETURNING " + column)
+	query, args, err := sql.ToSql()
+	if err != nil {
+		return nil, err
+	}
+	values := make([]string, 0)
+	if err = kv.db.Select(&values, query, args...); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
 func (kv *EntityRepository[Entity]) DeleteById(id string) error {
 	return kv.DeleteBy([]sq.Sqlizer{sq.Eq{"id": id}})
 }

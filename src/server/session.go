@@ -116,6 +116,12 @@ func (s *Server) StartSession(ctx context.Context, req *__.StartSessionRequest) 
 		return nil, startErr
 	}
 
+	// Resend the unconfirmed deleted chats to the listeners already connected
+	cli.PruneChatDeletions()
+	for _, event := range s.pendingChatDeletions(session) {
+		s.SendEventToAllListeners(session, event)
+	}
+
 	return &__.Empty{}, nil
 }
 

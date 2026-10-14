@@ -125,6 +125,9 @@ service MessageService {
   rpc SubscribePresence(SubscribePresenceRequest) returns (Empty);
   rpc CheckPhones(CheckPhonesRequest) returns (CheckPhonesResponse);
   rpc MarkChatUnread(ChatUnreadRequest) returns (Empty);
+  rpc DeleteChat(DeleteChatRequest) returns (DeleteChatResponse);
+  // Confirms a gows.ChatDeletedEvent with an ID was handled, so it is not sent again
+  rpc AckChatDeleted(AckChatDeletedRequest) returns (Empty);
 
   //
   // Account
@@ -562,6 +565,37 @@ message ChatUnreadRequest {
   Session session = 1;
   string jid = 2;
   bool read = 3;
+}
+
+message DeleteChatRequest {
+  Session session = 1;
+  string jid = 2;
+  bool deleteMedia = 3;
+}
+
+// The deletion sent for one address of a chat
+message DeleteChatRange {
+  // The chat, or the other address of a direct chat (LID or phone number)
+  string jid = 1;
+  // Messages sent up to this time (unix seconds) are deleted
+  int64 lastMessageTimestamp = 2;
+  // Key of the range: the last message stored under this address, empty if none
+  string lastMessageId = 3;
+  bool lastMessageFromMe = 4;
+  string lastMessageSender = 5;
+  int64 lastMessageSentAt = 6;
+}
+
+message AckChatDeletedRequest {
+  Session session = 1;
+  string id = 2;
+}
+
+message DeleteChatResponse {
+  // One per address, the one the phone uses first
+  repeated DeleteChatRange ranges = 1;
+  // False when WhatsApp accepted the patch but reading it back failed
+  bool confirmed = 2;
 }
 
 message PhoneInfo {

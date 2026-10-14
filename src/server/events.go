@@ -66,6 +66,7 @@ func (s *Server) StreamEvents(req *__.StreamEventsRequest, stream grpc.ServerStr
 	streamId := uuid.New()
 	listener := s.addListener(sessionName, streamId)
 	defer s.removeListener(sessionName, streamId)
+	s.replayChatDeletions(sessionName, listener)
 	exclude := make(map[string]struct{}, len(req.GetExclude()))
 	for _, eventType := range req.GetExclude() {
 		exclude[eventType] = struct{}{}

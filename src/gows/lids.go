@@ -4,7 +4,9 @@ import (
 	"context"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
+	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
 // ResolvePNByLid resolves the phone number behind a LID - first from the local store,
@@ -112,4 +114,48 @@ func (gows *GoWS) ResolveLidByPN(ctx context.Context, pn types.JID) (types.JID, 
 		return types.EmptyJID, nil
 	}
 	return gows.Store.LIDs.GetLIDForPN(ctx, pn)
+}
+
+// AltChatJID returns the other address of a direct chat (phone number or LID), empty if unknown.
+// DeleteChat and the storage cleanup both use it, so they cover the same addresses.
+func (gows *GoWS) AltChatJID(ctx context.Context, jid types.JID) (types.JID, error) {
+	if gows.Client == nil || gows.Store == nil || gows.Store.LIDs == nil {
+		return types.EmptyJID, nil
+	}
+	return altChatJID(ctx, gows.Store.LIDs, gows.validLIDPNPair, gows.Log, jid)
+}
+
+// altChatJID looks the other address up in lids, ignoring the pairs valid rejects
+func altChatJID(ctx context.Context, lids store.LIDStore, valid func(lid, pn types.JID) bool, log waLog.Logger, jid types.JID) (types.JID, error) {
+	if lids == nil {
+		return types.EmptyJID, nil
+	}
+	var lid, pn types.JID
+	var err error
+	switch jid.Server {
+	case types.HiddenUserServer:
+		lid = jid.ToNonAD()
+		pn, err = lids.GetPNForLID(ctx, lid)
+	case types.DefaultUserServer:
+		pn = jid.ToNonAD()
+		lid, err = lids.GetLIDForPN(ctx, pn)
+	default:
+		return types.EmptyJID, nil
+	}
+	if err != nil {
+		return types.EmptyJID, err
+	}
+	if lid.IsEmpty() || pn.IsEmpty() {
+		return types.EmptyJID, nil
+	}
+	if valid != nil && !valid(lid, pn) {
+		if log != nil {
+			log.Warnf("Ignoring suspicious stored LID-PN mapping %v => %v", lid, pn)
+		}
+		return types.EmptyJID, nil
+	}
+	if jid.Server == types.HiddenUserServer {
+		return pn.ToNonAD(), nil
+	}
+	return lid.ToNonAD(), nil
 }

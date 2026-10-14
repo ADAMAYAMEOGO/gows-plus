@@ -162,7 +162,7 @@ func (gows *GoWS) enrichAltJIDs(msg *events.Message) {
 
 func (gows *GoWS) handleEvent(event interface{}) {
 	go gows.reissueEvent(event)
-	go gows.storageEventHandler.handleEvent(event)
+	gows.storageEventHandler.handleEvent(event)
 }
 
 func (gows *GoWS) Start() error {

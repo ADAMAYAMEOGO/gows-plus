@@ -118,6 +118,17 @@ func isRealMessage(event *events.Message) bool {
 }
 
 func (st *StorageEventHandler) handleEvent(event interface{}) {
+	switch event.(type) {
+	case *events.LabelEdit, *events.LabelAssociationChat, *events.AppStateSyncComplete:
+		// Keep whatsmeow's order - the last change per label/chat wins
+		// In case of "add" then "delete" and similar events for 1 entity
+		st.processEvent(event)
+	default:
+		go st.processEvent(event)
+	}
+}
+
+func (st *StorageEventHandler) processEvent(event interface{}) {
 	// Handle all panic and log error + stack
 	defer func() {
 		if err := recover(); err != nil {

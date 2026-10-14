@@ -68,6 +68,7 @@ type LabelAssociationStorage interface {
 	GetLabelIDsByJID(jid types.JID) ([]string, error)
 	AddAssociation(jid types.JID, labelID string) error
 	RemoveAssociation(jid types.JID, labelID string) error
+	RemoveAssociationsByLabelID(labelID string) error
 }
 
 type LidmapStorage interface {

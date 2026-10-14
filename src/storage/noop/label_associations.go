@@ -28,3 +28,7 @@ func (s LabelAssociationStorage) AddAssociation(jid types.JID, labelID string) e
 func (s LabelAssociationStorage) RemoveAssociation(jid types.JID, labelID string) error {
 	return nil
 }
+
+func (s LabelAssociationStorage) RemoveAssociationsByLabelID(labelID string) error {
+	return nil
+}

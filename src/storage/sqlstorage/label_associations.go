@@ -76,3 +76,11 @@ func (s SqlLabelAssociationStore) RemoveAssociation(jid types.JID, labelID strin
 
 	return s.DeleteBy(conditions)
 }
+
+func (s SqlLabelAssociationStore) RemoveAssociationsByLabelID(labelID string) error {
+	conditions := []sq.Sqlizer{
+		sq.Eq{"label_id": labelID},
+	}
+
+	return s.DeleteBy(conditions)
+}

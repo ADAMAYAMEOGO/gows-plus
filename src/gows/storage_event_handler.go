@@ -3,7 +3,6 @@ package gows
 import (
 	"errors"
 	"runtime/debug"
-	"time"
 
 	"github.com/avast/retry-go"
 	"github.com/devlikeapro/gows/storage"
@@ -416,7 +415,13 @@ func (st *StorageEventHandler) handleLabelEdit(event *events.LabelEdit) {
 	action := event.Action
 	// Delete
 	if action.GetDeleted() {
-		err := st.storage.Labels.DeleteLabel(event.LabelID)
+		// No FK cascade anymore, drop the associations here
+		err := st.storage.LabelAssociations.RemoveAssociationsByLabelID(event.LabelID)
+		if err != nil {
+			st.log.Errorf("Error removing label associations for label %v: %v", event.LabelID, err)
+			return
+		}
+		err = st.storage.Labels.DeleteLabel(event.LabelID)
 		if err != nil {
 			st.log.Errorf("Error deleting label %v: %v", event.LabelID, err)
 			return
@@ -448,21 +453,8 @@ func (st *StorageEventHandler) handleLabelAssociationChat(event *events.LabelAss
 	labeled := event.Action.GetLabeled()
 
 	if labeled {
-		// Make sure we have the label
-		// it can happen on full sync or event disordering
-		err := retry.Do(
-			func() error {
-				_, err := st.storage.Labels.GetLabelById(labelID)
-				if err != nil {
-					return err
-				}
-				return nil
-			},
-			retry.Attempts(6),
-			retry.Delay(100*time.Millisecond),
-		)
-
-		err = st.storage.LabelAssociations.AddAssociation(jid, labelID)
+		// The label may not be stored yet (it can come later in the sync), store the association anyway
+		err := st.storage.LabelAssociations.AddAssociation(jid, labelID)
 		if err != nil {
 			st.log.Errorf("Error adding label association for JID %v and label %v: %v", jid, labelID, err)
 			return

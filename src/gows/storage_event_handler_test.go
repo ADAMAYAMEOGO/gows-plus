@@ -41,8 +41,9 @@ func newTestHandler() (*StorageEventHandler, *spyMessageStorage, *spyLabelStorag
 	st := &StorageEventHandler{
 		log: gowsLog.Stdout("test", "ERROR", false),
 		storage: &storage.Storage{
-			Messages: messages,
-			Labels:   labels,
+			Messages:          messages,
+			Labels:            labels,
+			LabelAssociations: noop.NewLabelAssociationStorage(),
 		},
 	}
 	return st, messages, labels

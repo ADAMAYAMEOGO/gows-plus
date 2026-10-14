@@ -78,13 +78,21 @@ func (s *Server) GetLabelsByJid(ctx context.Context, req *__.EntityByIdRequest) 
 		return nil, fmt.Errorf("error getting labels by jid: %w", err)
 	}
 	labels, err := cli.Storage.Labels.GetAllLabels()
+	if err != nil {
+		return nil, fmt.Errorf("error getting labels: %w", err)
+	}
 	labelById := make(map[string]*storage.Label)
 	for _, label := range labels {
 		labelById[label.ID] = label
 	}
 	labelsForJid := make([]*storage.Label, 0)
 	for _, labelId := range labelIds {
-		labelsForJid = append(labelsForJid, labelById[labelId])
+		// Skip associations whose label is not synced yet
+		label, ok := labelById[labelId]
+		if !ok {
+			continue
+		}
+		labelsForJid = append(labelsForJid, label)
 	}
 	response, err := toJsonList(labelsForJid)
 	if err != nil {

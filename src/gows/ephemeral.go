@@ -2,6 +2,7 @@ package gows
 
 import (
 	"errors"
+
 	"github.com/devlikeapro/gows/storage"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
@@ -53,12 +54,36 @@ func (gows *GoWS) getEphemeralSettings(jid types.JID) (*storage.StoredChatEpheme
 	}
 
 	switch jid.Server {
-	case types.DefaultUserServer, types.HiddenUserServer, types.GroupServer:
+	case types.GroupServer:
+		return gows.Storage.ChatEphemeralSetting.GetChatEphemeralSetting(jid)
+	case types.DefaultUserServer:
 		setting, err := gows.Storage.ChatEphemeralSetting.GetChatEphemeralSetting(jid)
-		if err != nil {
-			return nil, err
+		if errors.Is(err, storage.ErrNotFound) {
+			// No settings under the phone number - they can be stored under @lid
+			var lid types.JID
+			lid, err = gows.Store.LIDs.GetLIDForPN(gows.Context, jid)
+			if err != nil {
+				return nil, err
+			}
+			setting, err = gows.Storage.ChatEphemeralSetting.GetChatEphemeralSetting(lid)
 		}
-		return setting, nil
+		return setting, err
+	case types.HiddenUserServer:
+		setting, err := gows.Storage.ChatEphemeralSetting.GetChatEphemeralSetting(jid)
+		if errors.Is(err, storage.ErrNotFound) {
+			// No settings under @lid - they can be stored under the phone number
+			var pn types.JID
+			pn, err = gows.Store.LIDs.GetPNForLID(gows.Context, jid)
+			if err != nil {
+				return nil, err
+			}
+			if !pn.IsEmpty() && !gows.validLIDPNPair(jid, pn) {
+				gows.Log.Warnf("Ignoring suspicious stored LID-PN mapping %v => %v", jid, pn)
+				return nil, storage.ErrNotFound
+			}
+			setting, err = gows.Storage.ChatEphemeralSetting.GetChatEphemeralSetting(pn)
+		}
+		return setting, err
 	}
 	return nil, nil
 }

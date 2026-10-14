@@ -24,10 +24,11 @@ func (s *spyMessageStorage) DeleteMessage(id types.MessageID) error {
 	return nil
 }
 
-// spyLabelStorage records the labels we upserted.
+// spyLabelStorage records the labels we upserted and deleted.
 type spyLabelStorage struct {
 	*noop.LabelStorage
 	upserted []*storage.Label
+	deleted  []string
 }
 
 func (s *spyLabelStorage) UpsertLabel(label *storage.Label) error {
@@ -35,18 +36,53 @@ func (s *spyLabelStorage) UpsertLabel(label *storage.Label) error {
 	return nil
 }
 
-func newTestHandler() (*StorageEventHandler, *spyMessageStorage, *spyLabelStorage) {
+func (s *spyLabelStorage) DeleteLabel(id string) error {
+	s.deleted = append(s.deleted, id)
+	return nil
+}
+
+// spyLabelAssociationStorage records the association calls in order.
+type spyLabelAssociationStorage struct {
+	*noop.LabelAssociationStorage
+	ops []string
+}
+
+func (s *spyLabelAssociationStorage) AddAssociation(jid types.JID, labelID string) error {
+	s.ops = append(s.ops, "add "+labelID+" "+jid.String())
+	return nil
+}
+
+func (s *spyLabelAssociationStorage) RemoveAssociation(jid types.JID, labelID string) error {
+	s.ops = append(s.ops, "remove "+labelID+" "+jid.String())
+	return nil
+}
+
+func (s *spyLabelAssociationStorage) RemoveAssociationsByLabelID(labelID string) error {
+	s.ops = append(s.ops, "removeByLabel "+labelID)
+	return nil
+}
+
+func newTestHandler() (*StorageEventHandler, *spyMessageStorage, *spyLabelStorage, *spyLabelAssociationStorage) {
 	messages := &spyMessageStorage{MessageStorage: noop.NewMessageStorage()}
 	labels := &spyLabelStorage{LabelStorage: noop.NewLabelStorage()}
+	associations := &spyLabelAssociationStorage{LabelAssociationStorage: noop.NewLabelAssociationStorage()}
 	st := &StorageEventHandler{
 		log: gowsLog.Stdout("test", "ERROR", false),
 		storage: &storage.Storage{
 			Messages:          messages,
 			Labels:            labels,
-			LabelAssociations: noop.NewLabelAssociationStorage(),
+			LabelAssociations: associations,
 		},
 	}
-	return st, messages, labels
+	return st, messages, labels, associations
+}
+
+func labelChatEvent(labelID string, jid types.JID, labeled bool) *events.LabelAssociationChat {
+	return &events.LabelAssociationChat{
+		JID:     jid,
+		LabelID: labelID,
+		Action:  &waSyncAction.LabelAssociationAction{Labeled: &labeled},
+	}
 }
 
 func conversationMessage(text string) *events.Message {
@@ -57,7 +93,7 @@ func conversationMessage(text string) *events.Message {
 }
 
 func TestHandleMessageEventNilMessage(t *testing.T) {
-	st, messages, _ := newTestHandler()
+	st, messages, _, _ := newTestHandler()
 
 	// events.Message.Message is nil for messages we could not decrypt
 	st.handleMessageEvent(&events.Message{Info: types.MessageInfo{ID: "id-1"}})
@@ -70,7 +106,7 @@ func TestHandleMessageEventNilMessage(t *testing.T) {
 // ProtocolMessage_REVOKE is the zero value of the enum, so a message without a
 // protocol message must never be mistaken for a revoke.
 func TestHandleMessageEventPlainMessageIsNotRevoke(t *testing.T) {
-	st, messages, _ := newTestHandler()
+	st, messages, _, _ := newTestHandler()
 
 	st.handleMessageEvent(conversationMessage("hello"))
 
@@ -80,7 +116,7 @@ func TestHandleMessageEventPlainMessageIsNotRevoke(t *testing.T) {
 }
 
 func TestHandleMessageEventRevokeWithoutKey(t *testing.T) {
-	st, messages, _ := newTestHandler()
+	st, messages, _, _ := newTestHandler()
 
 	revoke := waE2E.ProtocolMessage_REVOKE
 	event := &events.Message{
@@ -97,7 +133,7 @@ func TestHandleMessageEventRevokeWithoutKey(t *testing.T) {
 }
 
 func TestHandleMessageEventRevoke(t *testing.T) {
-	st, messages, _ := newTestHandler()
+	st, messages, _, _ := newTestHandler()
 
 	revoke := waE2E.ProtocolMessage_REVOKE
 	id := "revoked-id"
@@ -130,7 +166,7 @@ func TestExtractEphemeralSettingsFromProtocolMessageWithoutType(t *testing.T) {
 
 // LabelEditAction has optional Name/Color, both used to be dereferenced blindly.
 func TestHandleLabelEditWithoutNameAndColor(t *testing.T) {
-	st, _, labels := newTestHandler()
+	st, _, labels, _ := newTestHandler()
 
 	st.handleLabelEdit(&events.LabelEdit{
 		LabelID: "label-1",
@@ -146,7 +182,7 @@ func TestHandleLabelEditWithoutNameAndColor(t *testing.T) {
 }
 
 func TestHandleLabelEditDeleted(t *testing.T) {
-	st, _, labels := newTestHandler()
+	st, _, labels, associations := newTestHandler()
 
 	deleted := true
 	st.handleLabelEdit(&events.LabelEdit{
@@ -157,10 +193,55 @@ func TestHandleLabelEditDeleted(t *testing.T) {
 	if len(labels.upserted) != 0 {
 		t.Fatalf("a deleted label must not be upserted, got %v", labels.upserted)
 	}
+	// No FK cascade in the DB anymore - the associations go first, then the label
+	if len(associations.ops) != 1 || associations.ops[0] != "removeByLabel label-1" {
+		t.Fatalf("expected the label associations to be removed, got %v", associations.ops)
+	}
+	if len(labels.deleted) != 1 || labels.deleted[0] != "label-1" {
+		t.Fatalf("expected the label to be deleted, got %v", labels.deleted)
+	}
+}
+
+// Label events run one by one in handleEvent, so the last change per label/chat wins (#2290).
+func TestHandleEventLabelAssociationKeepsOrder(t *testing.T) {
+	st, _, _, associations := newTestHandler()
+	jid := types.NewJID("100000000000001", types.HiddenUserServer)
+
+	st.handleEvent(labelChatEvent("label-1", jid, true))
+	st.handleEvent(labelChatEvent("label-1", jid, false))
+	st.handleEvent(labelChatEvent("label-1", jid, true))
+	st.handleEvent(labelChatEvent("label-1", jid, false))
+
+	expected := []string{
+		"add label-1 " + jid.String(),
+		"remove label-1 " + jid.String(),
+		"add label-1 " + jid.String(),
+		"remove label-1 " + jid.String(),
+	}
+	if len(associations.ops) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, associations.ops)
+	}
+	for i := range expected {
+		if associations.ops[i] != expected[i] {
+			t.Fatalf("expected %v, got %v", expected, associations.ops)
+		}
+	}
+}
+
+// The label can arrive after the association in a sync - store the association anyway, no waiting.
+func TestHandleLabelAssociationChatWithoutLabel(t *testing.T) {
+	st, _, _, associations := newTestHandler()
+	jid := types.NewJID("100000000000001", types.HiddenUserServer)
+
+	st.handleLabelAssociationChat(labelChatEvent("label-404", jid, true))
+
+	if len(associations.ops) != 1 || associations.ops[0] != "add label-404 "+jid.String() {
+		t.Fatalf("expected the association to be added, got %v", associations.ops)
+	}
 }
 
 func TestHandleHistorySyncWithoutData(t *testing.T) {
-	st, _, _ := newTestHandler()
+	st, _, _, _ := newTestHandler()
 
 	// Must not dereference a nil event.Data
 	st.handleHistorySync(&events.HistorySync{})

@@ -35,16 +35,19 @@ type StorageConfig struct {
 	Labels         bool
 	Contacts       bool
 	MessageSecrets bool
+	// PurgeDeletedChats clears deleted chats from storage (messages, ephemeral setting)
+	PurgeDeletedChats bool
 }
 
 func DefaultStorageConfig() StorageConfig {
 	return StorageConfig{
-		Messages:       true,
-		Groups:         true,
-		Chats:          true,
-		Labels:         true,
-		Contacts:       true,
-		MessageSecrets: true,
+		Messages:          true,
+		Groups:            true,
+		Chats:             true,
+		Labels:            true,
+		Contacts:          true,
+		MessageSecrets:    true,
+		PurgeDeletedChats: true,
 	}
 }
 

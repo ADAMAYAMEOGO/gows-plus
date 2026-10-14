@@ -2,10 +2,12 @@ package gows
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/devlikeapro/gows/storage"
 	"github.com/google/uuid"
+	"go.mau.fi/whatsmeow/types"
 )
 
 // chatDeletionLifetime is how long an unconfirmed deleted chat is kept
@@ -81,4 +83,26 @@ func (gows *GoWS) PruneChatDeletions() {
 	} else if pruned > 0 {
 		gows.Log.Warnf("Forgot %d deleted chat(s) never confirmed by the client", pruned)
 	}
+	_, err = gows.Storage.ChatDeletions.DeleteChatDeletionRequestsBefore(time.Now().Add(-chatDeletionLifetime))
+	if err != nil {
+		gows.Log.Warnf("Failed to prune the chat deletion requests: %v", err)
+	}
+}
+
+// RequestChatDeletion records the purge asked for the deletion of jids stamped deletedAt
+func (gows *GoWS) RequestChatDeletion(jids []types.JID, deletedAt time.Time, purge bool) error {
+	if gows.Storage == nil || gows.Storage.ChatDeletions == nil {
+		return errors.New("chat deletion requests are not stored")
+	}
+	for _, jid := range jids {
+		if err := gows.Storage.ChatDeletions.AddChatDeletionRequest(jid, deletedAt, purge); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PurgesDeletedChats tells whether deleted chats are cleared from storage by default
+func (gows *GoWS) PurgesDeletedChats() bool {
+	return gows.storageEventHandler == nil || !gows.storageEventHandler.keepDeletedChats
 }

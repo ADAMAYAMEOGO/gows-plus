@@ -435,11 +435,12 @@ func BuildSession(
 	}
 	gows.Storage = BuildStorage(container, gows, storageCfg)
 	gows.storageEventHandler = &StorageEventHandler{
-		gows:       gows,
-		log:        gows.Log.Sub("Storage"),
-		storage:    gows.Storage,
-		ignoreJids: ignoreJids,
-		emit:       gows.emitEvent,
+		gows:             gows,
+		log:              gows.Log.Sub("Storage"),
+		storage:          gows.Storage,
+		ignoreJids:       ignoreJids,
+		emit:             gows.emitEvent,
+		keepDeletedChats: !storageCfg.PurgeDeletedChats,
 	}
 	gows.GetMessageForRetry = gows.storageEventHandler.GetMessageForRetry
 	gows.BackgroundEventCtx = gows.Context

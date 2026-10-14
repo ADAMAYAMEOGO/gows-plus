@@ -96,4 +96,11 @@ type ChatDeletionStorage interface {
 	DeleteChatDeletion(id string) error
 	// DeleteChatDeletionsBefore forgets the deletions added before the time
 	DeleteChatDeletionsBefore(before time.Time) (int64, error)
+
+	// AddChatDeletionRequest records the purge asked for the deletion of jid stamped deletedAt
+	AddChatDeletionRequest(jid types.JID, deletedAt time.Time, purge bool) error
+	// GetChatDeletionRequest returns that request, found is false for a deletion made elsewhere
+	GetChatDeletionRequest(jid types.JID, deletedAt time.Time) (purge bool, found bool, err error)
+	// DeleteChatDeletionRequestsBefore forgets the requests added before the time
+	DeleteChatDeletionRequestsBefore(before time.Time) (int64, error)
 }

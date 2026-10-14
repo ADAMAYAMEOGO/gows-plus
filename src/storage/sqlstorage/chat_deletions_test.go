@@ -8,6 +8,7 @@ import (
 
 	"github.com/devlikeapro/gows/storage"
 	"github.com/stretchr/testify/require"
+	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
@@ -77,4 +78,40 @@ func TestChatDeletionsTableSurvivesAReopen(t *testing.T) {
 	pending, err := second.NewChatDeletionStorage().GetChatDeletions()
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
+}
+
+// A request is found for its own chat and deletion time only, and stays
+// until pruned.
+func TestChatDeletionRequestsMatchTheirOwnDeletion(t *testing.T) {
+	store := newTestContainer(t, ChatDeletionRequestsTable).NewChatDeletionStorage()
+	pn := types.NewJID("22670000000", types.DefaultUserServer)
+	lid := types.NewJID("123456789012345", types.HiddenUserServer)
+	at := time.UnixMilli(1760000100123)
+	require.NoError(t, store.AddChatDeletionRequest(pn, at, false))
+	require.NoError(t, store.AddChatDeletionRequest(lid, at, true))
+
+	_, found, err := store.GetChatDeletionRequest(pn, at.Add(time.Millisecond))
+	require.NoError(t, err)
+	require.False(t, found, "another deletion time")
+	_, found, err = store.GetChatDeletionRequest(types.NewJID("1", types.DefaultUserServer), at)
+	require.NoError(t, err)
+	require.False(t, found, "another chat")
+
+	for i := 0; i < 2; i++ {
+		purge, found, err := store.GetChatDeletionRequest(pn, at)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.False(t, purge)
+	}
+	purge, found, err := store.GetChatDeletionRequest(lid, at)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.True(t, purge)
+
+	pruned, err := store.DeleteChatDeletionRequestsBefore(time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	require.Equal(t, int64(2), pruned)
+	_, found, err = store.GetChatDeletionRequest(pn, at)
+	require.NoError(t, err)
+	require.False(t, found)
 }

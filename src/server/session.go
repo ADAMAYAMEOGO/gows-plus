@@ -80,6 +80,9 @@ func (s *Server) StartSession(ctx context.Context, req *__.StartSessionRequest) 
 		if req.Config.Storage.MessageSecrets != nil {
 			cfg.Storage.MessageSecrets = req.Config.Storage.GetMessageSecrets()
 		}
+		if req.Config.Storage.PurgeDeletedChats != nil {
+			cfg.Storage.PurgeDeletedChats = req.Config.Storage.GetPurgeDeletedChats()
+		}
 	}
 
 	session := req.GetId()

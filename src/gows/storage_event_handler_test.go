@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -284,6 +285,7 @@ func TestHandleDeleteChatUpToTheMessageRange(t *testing.T) {
 		Timestamp:     deletedAt,
 		DeletedBefore: time.Unix(1760000001, 0),
 		DeleteMedia:   true,
+		Purged:        true,
 		MessageIDs:    []types.MessageID{"a", "b"},
 	}
 	if len(*emitted) != 1 || !reflect.DeepEqual((*emitted)[0], want) {
@@ -685,13 +687,14 @@ func newDeleteChatTestStorage(t *testing.T) (*storage.Storage, string) {
 	db, err := sqlx.Open(dialect, address)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	for _, table := range []string{"gows_messages", "gows_chat_ephemeral_setting"} {
+	for _, table := range []string{"gows_messages", "gows_chat_ephemeral_setting", sqlstorage.ChatDeletionsTable, sqlstorage.ChatDeletionRequestsTable} {
 		_, err = db.Exec("DELETE FROM " + table)
 		require.NoError(t, err)
 	}
 	return &storage.Storage{
 		Messages:             container.NewMessageStorage(),
 		ChatEphemeralSetting: container.NewChatEphemeralSettingStorage(),
+		ChatDeletions:        container.NewChatDeletionStorage(),
 	}, dialect
 }
 
@@ -774,10 +777,36 @@ func TestHandleDeleteChatClearsTheEphemeralSettingOfBothAddresses(t *testing.T) 
 	}
 }
 
-// spyChatDeletionStorage keeps the deleted chats in memory.
+// spyChatDeletionStorage keeps the deleted chats and the deletion requests in memory.
 type spyChatDeletionStorage struct {
-	kept []*storage.PendingChatDeletion
-	err  error
+	kept       []*storage.PendingChatDeletion
+	err        error
+	requests   map[string]bool
+	requestErr error
+}
+
+func chatDeletionRequestKey(jid types.JID, deletedAt time.Time) string {
+	return fmt.Sprintf("%s|%d", jid, deletedAt.UnixMilli())
+}
+
+func (s *spyChatDeletionStorage) AddChatDeletionRequest(jid types.JID, deletedAt time.Time, purge bool) error {
+	if s.requests == nil {
+		s.requests = map[string]bool{}
+	}
+	s.requests[chatDeletionRequestKey(jid, deletedAt)] = purge
+	return nil
+}
+
+func (s *spyChatDeletionStorage) GetChatDeletionRequest(jid types.JID, deletedAt time.Time) (bool, bool, error) {
+	if s.requestErr != nil {
+		return false, false, s.requestErr
+	}
+	purge, found := s.requests[chatDeletionRequestKey(jid, deletedAt)]
+	return purge, found, nil
+}
+
+func (s *spyChatDeletionStorage) DeleteChatDeletionRequestsBefore(before time.Time) (int64, error) {
+	return 0, nil
 }
 
 func (s *spyChatDeletionStorage) AddChatDeletion(deletion *storage.PendingChatDeletion) error {
@@ -1000,4 +1029,115 @@ func TestHandleABroadcastListDeletedOnThePhone(t *testing.T) {
 	ignoring.ignoreJids = &IgnoreJidsConfig{Broadcast: true}
 	ignoring.processEvent(&events.DeleteChat{JID: list, Timestamp: time.UnixMilli(1760000100000)})
 	require.Empty(t, *ignored)
+}
+
+// A request with purge decides for its own deletion only, never for a deletion made on the phone.
+func TestHandleDeleteChatPurge(t *testing.T) {
+	deletedAt := time.UnixMilli(1760000100123)
+	for _, tc := range []struct {
+		name    string
+		keep    bool               // the session keeps deleted chats
+		request map[types.JID]bool // purge asked for the deletion at deletedAt
+		event   time.Time
+		purged  bool
+	}{
+		{"session default", false, nil, deletedAt, true},
+		{"session keeps", true, nil, deletedAt, false},
+		{"request keeps, session purges", false, map[types.JID]bool{deleteChatPN: false, deleteChatLID: false}, deletedAt, false},
+		{"request purges, session keeps", true, map[types.JID]bool{deleteChatPN: true, deleteChatLID: true}, deletedAt, true},
+		{"phone deletion, a request for another time", false, map[types.JID]bool{deleteChatPN: false}, deletedAt.Add(time.Millisecond), true},
+		{"phone deletion, session keeps", true, map[types.JID]bool{deleteChatPN: true}, deletedAt.Add(-time.Second), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, messages, ephemeral, emitted := newDeleteChatTestHandler()
+			st.keepDeletedChats = tc.keep
+			requests := &spyChatDeletionStorage{}
+			for jid, purge := range tc.request {
+				require.NoError(t, requests.AddChatDeletionRequest(jid, deletedAt, purge))
+			}
+			st.storage.ChatDeletions = requests
+			messages.chatMessages = map[types.JID][]types.MessageID{deleteChatPN: {"a"}, deleteChatLID: {"b"}}
+
+			st.processEvent(&events.DeleteChat{JID: deleteChatPN, Timestamp: tc.event, DeleteMedia: true})
+
+			event := (*emitted)[0].(*ChatDeletedEvent)
+			require.Equal(t, tc.purged, event.Purged)
+			if tc.purged {
+				require.ElementsMatch(t, []types.MessageID{"a", "b"}, event.MessageIDs)
+				require.Len(t, messages.deletedChats, 2)
+				require.Len(t, ephemeral.deleted, 2)
+			} else {
+				require.Empty(t, event.MessageIDs)
+				require.Empty(t, messages.deletedChats)
+				require.Empty(t, ephemeral.deleted)
+			}
+			require.True(t, event.DeleteMedia, "the gallery flag is reported either way")
+			require.Empty(t, event.Error)
+		})
+	}
+}
+
+// A request that can not be read keeps the chat, and says so.
+func TestHandleDeleteChatKeepsWhenTheRequestCanNotBeRead(t *testing.T) {
+	fastDeleteChatRetries(t)
+	st, messages, _, emitted := newDeleteChatTestHandler()
+	st.storage.ChatDeletions = &spyChatDeletionStorage{requestErr: errors.New("database is locked")}
+	messages.chatMessages = map[types.JID][]types.MessageID{deleteChatPN: {"a"}}
+
+	st.processEvent(&events.DeleteChat{JID: deleteChatPN, Timestamp: time.UnixMilli(1760000100123)})
+
+	event := (*emitted)[0].(*ChatDeletedEvent)
+	require.False(t, event.Purged)
+	require.Empty(t, messages.deletedChats)
+	require.Contains(t, event.Error, "deletion request of")
+}
+
+// A full sync replaying a deletion this client made finds its request again.
+func TestPurgeRequestSurvivesAFullSyncReplay(t *testing.T) {
+	st, messages, _, emitted := newDeleteChatTestHandler()
+	requests := &spyChatDeletionStorage{}
+	deletedAt := time.UnixMilli(1760000100123)
+	require.NoError(t, requests.AddChatDeletionRequest(deleteChatPN, deletedAt, false))
+	st.storage.ChatDeletions = requests
+	messages.chatMessages = map[types.JID][]types.MessageID{deleteChatPN: {"a"}}
+
+	st.processEvent(&events.DeleteChat{JID: deleteChatPN, Timestamp: deletedAt})
+	st.processEvent(&events.DeleteChat{JID: deleteChatPN, Timestamp: deletedAt, FromFullSync: true})
+
+	require.Empty(t, messages.deletedChats)
+	require.False(t, (*emitted)[0].(*ChatDeletedEvent).Purged)
+}
+
+// End to end on a real database: a request keeping the chat matches the
+// deletion it sent (millisecond timestamp), not a later phone deletion.
+func TestPurgeRequestOnARealDatabase(t *testing.T) {
+	s, dialect := newDeleteChatTestStorage(t)
+	putDeleteChatTestMessage(t, s, deleteChatPN, "PN-1", time.Unix(1760000000, 0), true)
+	putDeleteChatTestMessage(t, s, deleteChatLID, "LID-1", time.Unix(1760000010, 0), true)
+	gows := &GoWS{Client: &whatsmeow.Client{Log: waLog.Noop}, Storage: s}
+	sentAt := time.Unix(1760000100, 123456789)
+	require.NoError(t, gows.RequestChatDeletion([]types.JID{deleteChatPN, deleteChatLID}, sentAt, false), dialect)
+	st := &StorageEventHandler{log: gowsLog.Stdout("test", "ERROR", false), storage: s}
+	st.lids = &fakeLIDStore{lid: deleteChatLID, pn: deleteChatPN}
+	var emitted []interface{}
+	st.emit = func(e interface{}) { emitted = append(emitted, e) }
+
+	// Our patch comes back as one event per address, stamped in milliseconds
+	for _, jid := range []types.JID{deleteChatPN, deleteChatLID} {
+		st.processEvent(&events.DeleteChat{JID: jid, Timestamp: time.UnixMilli(sentAt.UnixMilli())})
+	}
+
+	require.Len(t, emitted, 1, dialect)
+	require.False(t, emitted[0].(*ChatDeletedEvent).Purged, dialect)
+	for _, id := range []types.MessageID{"PN-1", "LID-1"} {
+		_, err := s.Messages.GetMessage(id)
+		require.NoError(t, err, "%s %s kept", dialect, id)
+	}
+
+	// Later, the chat is deleted on the phone: the session setting applies
+	st.processEvent(&events.DeleteChat{JID: deleteChatLID, Timestamp: time.UnixMilli(1760000200000)})
+
+	last := emitted[len(emitted)-1].(*ChatDeletedEvent)
+	require.True(t, last.Purged, dialect)
+	require.ElementsMatch(t, []types.MessageID{"PN-1", "LID-1"}, last.MessageIDs, dialect)
 }

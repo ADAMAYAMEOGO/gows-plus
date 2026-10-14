@@ -252,6 +252,8 @@ message SessionStorageConfig {
   optional bool labels = 4;
   optional bool contacts = 5;
   optional bool message_secrets = 6;
+  // Clear deleted chats from storage (messages, ephemeral setting). Unset: true
+  optional bool purge_deleted_chats = 7;
 }
 
 message SessionProxyConfig {
@@ -571,6 +573,8 @@ message DeleteChatRequest {
   Session session = 1;
   string jid = 2;
   bool deleteMedia = 3;
+  // Clear the chat from storage once deleted. Unset: the session's purge_deleted_chats
+  optional bool purge = 4;
 }
 
 // The deletion sent for one address of a chat
@@ -596,6 +600,8 @@ message DeleteChatResponse {
   repeated DeleteChatRange ranges = 1;
   // False when WhatsApp accepted the patch but reading it back failed
   bool confirmed = 2;
+  // Whether the chat is cleared from the server when the deletion comes back
+  bool purge = 3;
 }
 
 message PhoneInfo {

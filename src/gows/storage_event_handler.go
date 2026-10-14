@@ -36,6 +36,8 @@ type StorageEventHandler struct {
 	deleteChatLock sync.Mutex
 	// recentDeletedChats are the deletions emitted lately
 	recentDeletedChats recentKeys
+	// keepDeletedChats is StorageConfig.PurgeDeletedChats false
+	keepDeletedChats bool
 }
 
 func (st *StorageEventHandler) shouldIgnoreJID(jid types.JID) bool {
@@ -412,7 +414,7 @@ func (st *StorageEventHandler) handleGroupInfo(info *events.GroupInfo) {
 }
 
 // handleDeleteChat clears a deleted chat (messages up to the deletion, ephemeral setting) under both
-// addresses of a direct chat, then emits ChatDeletedEvent - once for the two mutations of one deletion.
+// addresses of a direct chat unless it is kept (purgeDeletedChat), then emits ChatDeletedEvent once.
 func (st *StorageEventHandler) handleDeleteChat(event *events.DeleteChat) {
 	if event.JID.IsEmpty() {
 		return
@@ -424,8 +426,13 @@ func (st *StorageEventHandler) handleDeleteChat(event *events.DeleteChat) {
 	altJID := st.altChatJID(event.JID)
 	deleted := make([]types.MessageID, 0)
 	failures := make([]string, 0)
+	purge, err := st.purgeDeletedChat(event)
+	if err != nil {
+		st.log.Errorf("Error reading the deletion request of chat %v, keeping it: %v", event.JID, err)
+		failures = append(failures, fmt.Sprintf("deletion request of %v: %v", event.JID, err))
+	}
 	for _, jid := range []types.JID{event.JID, altJID} {
-		if jid.IsEmpty() {
+		if jid.IsEmpty() || !purge {
 			continue
 		}
 		var ids []types.MessageID
@@ -446,7 +453,7 @@ func (st *StorageEventHandler) handleDeleteChat(event *events.DeleteChat) {
 			failures = append(failures, fmt.Sprintf("ephemeral setting of %v: %v", jid, err))
 		}
 	}
-	st.log.Debugf("Deleted chat %v (%v): %d messages before %v", event.JID, altJID, len(deleted), deleteBefore)
+	st.log.Debugf("Deleted chat %v (%v): purge %v, %d messages before %v", event.JID, altJID, purge, len(deleted), deleteBefore)
 
 	key := deletedChatKey(event, altJID, deleteBefore)
 	if len(deleted) == 0 && len(failures) == 0 && st.recentDeletedChats.seen(key) {
@@ -461,11 +468,32 @@ func (st *StorageEventHandler) handleDeleteChat(event *events.DeleteChat) {
 		DeletedBefore: deleteBefore,
 		DeleteMedia:   event.DeleteMedia,
 		FromFullSync:  event.FromFullSync,
+		Purged:        purge,
 		MessageIDs:    deleted,
 		Error:         strings.Join(failures, "; "),
 	}
 	st.keepChatDeletion(chatDeleted)
 	st.emitEvent(chatDeleted)
+}
+
+// purgeDeletedChat follows the DeleteChat request of this deletion, else the session setting.
+// A request that can't be read keeps the chat.
+func (st *StorageEventHandler) purgeDeletedChat(event *events.DeleteChat) (bool, error) {
+	if st.storage.ChatDeletions == nil {
+		return !st.keepDeletedChats, nil
+	}
+	var purge, found bool
+	err := retryDeleteChat(func() (err error) {
+		purge, found, err = st.storage.ChatDeletions.GetChatDeletionRequest(event.JID, event.Timestamp)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	if found {
+		return purge, nil
+	}
+	return !st.keepDeletedChats, nil
 }
 
 // retryDeleteChat retries a cleanup step: the mutation is not delivered again

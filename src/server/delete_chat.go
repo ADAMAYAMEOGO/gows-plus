@@ -30,7 +30,11 @@ func (s *Server) DeleteChat(ctx context.Context, req *__.DeleteChatRequest) (*__
 	if err != nil {
 		return nil, err
 	}
-	result, err := newChatDeletion(cli).run(ctx, jid, req.GetDeleteMedia())
+	var purge *bool
+	if req.Purge != nil {
+		purge = proto.Bool(req.GetPurge())
+	}
+	result, err := newChatDeletion(cli).run(ctx, jid, req.GetDeleteMedia(), purge)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +86,7 @@ func pushPendingEvents(listener *eventListener, events []*gows.ChatDeletedEvent)
 }
 
 func (result *deleteChatResult) toResponse() *__.DeleteChatResponse {
-	response := &__.DeleteChatResponse{Confirmed: result.Confirmed}
+	response := &__.DeleteChatResponse{Confirmed: result.Confirmed, Purge: result.Purge}
 	for _, address := range result.Addresses {
 		item := &__.DeleteChatRange{
 			Jid:                  address.JID.String(),
@@ -112,6 +116,10 @@ type chatDeletion struct {
 	// refetch reads the app state again in the background
 	refetch func()
 	now     func() time.Time
+	// request records the purge asked for the deletion (gows.RequestChatDeletion)
+	request func(jids []types.JID, deletedAt time.Time, purge bool) error
+	// purgeByDefault tells whether deleted chats are purged without a request
+	purgeByDefault bool
 }
 
 func newChatDeletion(cli *gows.GoWS) *chatDeletion {
@@ -122,9 +130,11 @@ func newChatDeletion(cli *gows.GoWS) *chatDeletion {
 		inGroup: func(ctx context.Context, jid types.JID) (bool, error) {
 			return inGroup(cli.GetGroupInfo(ctx, jid))
 		},
-		send:    cli.SendAppState,
-		refetch: func() { go refetchAppState(cli) },
-		now:     time.Now,
+		send:           cli.SendAppState,
+		refetch:        func() { go refetchAppState(cli) },
+		now:            time.Now,
+		request:        cli.RequestChatDeletion,
+		purgeByDefault: cli.PurgesDeletedChats(),
 	}
 }
 
@@ -143,11 +153,14 @@ type deleteChatResult struct {
 	End time.Time
 	// Confirmed is false when WhatsApp accepted the patch but reading it back failed
 	Confirmed bool
+	// Purge tells whether the chat is cleared from storage when the deletion comes back
+	Purge bool
 }
 
 // run sends one mutation per address of the chat (phone number and LID), in one patch.
 // Every range ends at the last message of the whole chat, with the key of the last message under its own address.
-func (d *chatDeletion) run(ctx context.Context, jid types.JID, deleteMedia bool) (*deleteChatResult, error) {
+// purge, when set, is recorded before sending and overrides the session setting for this deletion.
+func (d *chatDeletion) run(ctx context.Context, jid types.JID, deleteMedia bool, purge *bool) (*deleteChatResult, error) {
 	if jid.Server == types.GroupServer {
 		// The phone only offers "Delete group" once the group is left
 		member, err := d.inGroup(ctx, jid)
@@ -188,7 +201,22 @@ func (d *chatDeletion) run(ctx context.Context, jid types.JID, deleteMedia bool)
 		result.End = d.now()
 	}
 
-	err := d.send(ctx, buildDeleteChatPatch(result, deleteMedia))
+	patch := buildDeleteChatPatch(result, deleteMedia)
+	patch.Timestamp = d.now()
+	result.Purge = d.purgeByDefault
+	if purge != nil {
+		jids := make([]types.JID, 0, len(result.Addresses))
+		for _, address := range result.Addresses {
+			jids = append(jids, address.JID)
+		}
+		// Kept even if sending fails: an unused request never matches another deletion
+		if err := d.request(jids, patch.Timestamp, *purge); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to record the purge of chat %s: %v", jid, err)
+		}
+		result.Purge = *purge
+	}
+
+	err := d.send(ctx, patch)
 	switch {
 	case err == nil:
 		result.Confirmed = true

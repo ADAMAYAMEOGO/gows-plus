@@ -33,6 +33,7 @@ type ChatDeletedEvent struct {
 	DeletedBefore time.Time         // the stored messages sent before this time were deleted
 	DeleteMedia   bool              // the media flag of the mutation (phone gallery)
 	FromFullSync  bool              // whether the deletion comes from an app state full sync
+	Purged        bool              // whether the chat was cleared from storage (else nothing was removed)
 	MessageIDs    []types.MessageID // the deleted stored messages
 	Error         string            // what failed in the cleanup, empty if it all went through
 }

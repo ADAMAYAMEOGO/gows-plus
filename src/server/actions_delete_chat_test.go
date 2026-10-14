@@ -74,9 +74,17 @@ func (s *lastMessagesStorage) GetChatMessages(jid types.JID, filters storage.Mes
 
 type testChatDeletion struct {
 	*chatDeletion
-	messages  *lastMessagesStorage
-	sent      []appstate.PatchInfo
-	refetched int
+	messages   *lastMessagesStorage
+	sent       []appstate.PatchInfo
+	refetched  int
+	requests   []deleteChatRequest
+	requestErr error
+}
+
+type deleteChatRequest struct {
+	jid   types.JID
+	at    time.Time
+	purge bool
 }
 
 func newTestChatDeletion(alt types.JID) *testChatDeletion {
@@ -95,6 +103,13 @@ func newTestChatDeletion(alt types.JID) *testChatDeletion {
 		},
 		refetch: func() { td.refetched++ },
 		now:     func() time.Time { return deleteChatNow },
+		request: func(jids []types.JID, deletedAt time.Time, purge bool) error {
+			for _, jid := range jids {
+				td.requests = append(td.requests, deleteChatRequest{jid: jid, at: deletedAt, purge: purge})
+			}
+			return td.requestErr
+		},
+		purgeByDefault: true,
 	}
 	return td
 }
@@ -225,7 +240,7 @@ func TestDeleteChatMessageKeyGroupChat(t *testing.T) {
 func TestDeleteChatWithAnEmptyStore(t *testing.T) {
 	td := newTestChatDeletion(deleteChatLID)
 
-	result, err := td.run(context.Background(), deleteChatPN, false)
+	result, err := td.run(context.Background(), deleteChatPN, false, nil)
 
 	require.NoError(t, err)
 	require.Len(t, td.sent, 1)
@@ -246,7 +261,7 @@ func TestDeleteChatSendsEachAddressItsOwnKey(t *testing.T) {
 	td.messages.last[deleteChatPN] = storedDeleteChatMessage(types.MessageSource{Chat: deleteChatPN, Sender: deleteChatPN}, "OLD-PN", old)
 	td.messages.last[deleteChatLID] = storedDeleteChatMessage(types.MessageSource{Chat: deleteChatLID, Sender: deleteChatLID}, "NEW-LID", newer)
 
-	result, err := td.run(context.Background(), deleteChatPN, true)
+	result, err := td.run(context.Background(), deleteChatPN, true, nil)
 
 	require.NoError(t, err)
 	require.Len(t, td.sent, 1)
@@ -290,7 +305,7 @@ func TestDeleteChatPutsThePhoneAddressFirst(t *testing.T) {
 			td := newTestChatDeletion(tc.alt)
 			td.lidFirst = tc.lidFirst
 
-			result, err := td.run(context.Background(), tc.asked, false)
+			result, err := td.run(context.Background(), tc.asked, false, nil)
 
 			require.NoError(t, err)
 			assert.Equal(t, tc.first, td.sent[0].Mutations[0].Index[1])
@@ -302,7 +317,7 @@ func TestDeleteChatPutsThePhoneAddressFirst(t *testing.T) {
 func TestDeleteChatWithoutKnownOtherAddress(t *testing.T) {
 	td := newTestChatDeletion(types.EmptyJID)
 
-	_, err := td.run(context.Background(), deleteChatLID, false)
+	_, err := td.run(context.Background(), deleteChatLID, false, nil)
 
 	require.NoError(t, err)
 	mutations := mutationsOf(t, td.sent[0])
@@ -323,7 +338,7 @@ func TestDeleteChatGroupHasOneMutation(t *testing.T) {
 		IsGroup: true,
 	}, "group-id", sent)
 
-	_, err := td.run(context.Background(), deleteChatGroupJID, false)
+	_, err := td.run(context.Background(), deleteChatGroupJID, false, nil)
 
 	require.NoError(t, err)
 	mutations := mutationsOf(t, td.sent[0])
@@ -338,7 +353,7 @@ func TestDeleteChatStorageErrorSendsNothing(t *testing.T) {
 	td := newTestChatDeletion(deleteChatLID)
 	td.messages.err = errors.New("database is locked")
 
-	_, err := td.run(context.Background(), deleteChatPN, false)
+	_, err := td.run(context.Background(), deleteChatPN, false, nil)
 
 	assert.Equal(t, codes.Internal, status.Code(err))
 	assert.Empty(t, td.sent)
@@ -350,7 +365,7 @@ func TestDeleteChatOtherAddressErrorSendsNothing(t *testing.T) {
 		return types.EmptyJID, errors.New("lid map unavailable")
 	}
 
-	_, err := td.run(context.Background(), deleteChatPN, false)
+	_, err := td.run(context.Background(), deleteChatPN, false, nil)
 
 	assert.Equal(t, codes.Internal, status.Code(err))
 	assert.Empty(t, td.sent)
@@ -362,7 +377,7 @@ func TestDeleteChatSendErrorIsReturned(t *testing.T) {
 	sendErr := errors.New("websocket not connected")
 	td.send = func(ctx context.Context, patch appstate.PatchInfo) error { return sendErr }
 
-	_, err := td.run(context.Background(), deleteChatPN, false)
+	_, err := td.run(context.Background(), deleteChatPN, false, nil)
 
 	assert.ErrorIs(t, err, sendErr)
 }
@@ -372,7 +387,7 @@ func TestDeleteChatMutationKeepsTheUpstreamFormat(t *testing.T) {
 	sent := time.Unix(1750000000, 0)
 	td.messages.last[deleteChatLID] = storedDeleteChatMessage(types.MessageSource{Chat: deleteChatLID, Sender: deleteChatLID}, "last-id", sent)
 
-	_, err := td.run(context.Background(), deleteChatLID, true)
+	_, err := td.run(context.Background(), deleteChatLID, true, nil)
 
 	require.NoError(t, err)
 	got := td.sent[0].Mutations[0]
@@ -418,7 +433,7 @@ func TestDeleteChatRangesFromARealStore(t *testing.T) {
 	td := newTestChatDeletion(deleteChatLID)
 	td.chatDeletion.messages = messages
 
-	_, err = td.run(context.Background(), deleteChatPN, false)
+	_, err = td.run(context.Background(), deleteChatPN, false, nil)
 
 	require.NoError(t, err)
 	mutations := mutationsOf(t, td.sent[0])
@@ -438,7 +453,7 @@ func TestDeleteChatRefusesAGroupStillJoined(t *testing.T) {
 		return inGroup(&types.GroupInfo{JID: jid}, nil)
 	}
 
-	_, err := td.run(context.Background(), deleteChatGroupJID, false)
+	_, err := td.run(context.Background(), deleteChatGroupJID, false, nil)
 
 	assert.Equal(t, codes.FailedPrecondition, status.Code(err))
 	assert.Empty(t, td.sent)
@@ -451,7 +466,7 @@ func TestDeleteChatAcceptsAGroupLeftOrGone(t *testing.T) {
 			return inGroup(nil, fmt.Errorf("%w: iq error", groupErr))
 		}
 
-		_, err := td.run(context.Background(), deleteChatGroupJID, false)
+		_, err := td.run(context.Background(), deleteChatGroupJID, false, nil)
 
 		require.NoError(t, err, groupErr)
 		assert.Len(t, td.sent, 1, groupErr)
@@ -464,7 +479,7 @@ func TestDeleteChatGroupCheckErrorSendsNothing(t *testing.T) {
 		return inGroup(nil, errors.New("info query timed out"))
 	}
 
-	_, err := td.run(context.Background(), deleteChatGroupJID, false)
+	_, err := td.run(context.Background(), deleteChatGroupJID, false, nil)
 
 	assert.Equal(t, codes.Unavailable, status.Code(err))
 	assert.Empty(t, td.sent)
@@ -477,7 +492,7 @@ func TestDeleteChatDoesNotQueryGroupsForDirectChats(t *testing.T) {
 		return false, nil
 	}
 
-	_, err := td.run(context.Background(), deleteChatPN, false)
+	_, err := td.run(context.Background(), deleteChatPN, false, nil)
 
 	require.NoError(t, err)
 }
@@ -492,7 +507,7 @@ func TestDeleteChatResponse(t *testing.T) {
 		IsFromMe: true,
 	}, "NEW-LID", sentAt)
 
-	result, err := td.run(context.Background(), deleteChatPN, false)
+	result, err := td.run(context.Background(), deleteChatPN, false, nil)
 	require.NoError(t, err)
 	response := result.toResponse()
 
@@ -519,7 +534,7 @@ func TestDeleteChatSentButNotReadBack(t *testing.T) {
 		return fmt.Errorf("%s: %w", appStateFetchAfterSendError, errors.New("context deadline exceeded"))
 	}
 
-	result, err := td.run(context.Background(), deleteChatPN, false)
+	result, err := td.run(context.Background(), deleteChatPN, false, nil)
 
 	require.NoError(t, err)
 	assert.False(t, result.Confirmed)
@@ -546,7 +561,7 @@ func TestDeleteTheOwnChatRangeIgnoresBroadcastListMessages(t *testing.T) {
 	td := newTestChatDeletion(ownLID)
 	td.chatDeletion.messages = messages
 
-	result, err := td.run(context.Background(), ownPN, false)
+	result, err := td.run(context.Background(), ownPN, false, nil)
 
 	require.NoError(t, err)
 	assert.True(t, self.Equal(result.End), "range end %v", result.End)
@@ -557,4 +572,49 @@ func TestDeleteTheOwnChatRangeIgnoresBroadcastListMessages(t *testing.T) {
 		assert.NotContains(t, mutation.index[1], "@broadcast")
 		assert.NotContains(t, mutation.keyID, "LIST")
 	}
+}
+
+// The purge is recorded for each address and the patch timestamp before anything is sent.
+func TestDeleteChatRecordsThePurgeAsked(t *testing.T) {
+	for _, purge := range []bool{false, true} {
+		td := newTestChatDeletion(deleteChatLID)
+		td.purgeByDefault = !purge
+		td.send = func(ctx context.Context, patch appstate.PatchInfo) error {
+			require.Len(t, td.requests, 2, "recorded before sending")
+			td.sent = append(td.sent, patch)
+			return nil
+		}
+
+		result, err := td.run(context.Background(), deleteChatPN, false, proto.Bool(purge))
+
+		require.NoError(t, err)
+		assert.Equal(t, purge, result.Purge)
+		assert.Equal(t, purge, result.toResponse().GetPurge())
+		assert.Equal(t, []deleteChatRequest{
+			{jid: deleteChatPN, at: deleteChatNow, purge: purge},
+			{jid: deleteChatLID, at: deleteChatNow, purge: purge},
+		}, td.requests)
+		assert.Equal(t, deleteChatNow, td.sent[0].Timestamp)
+	}
+}
+
+func TestDeleteChatWithoutPurgeUsesTheSessionSetting(t *testing.T) {
+	td := newTestChatDeletion(deleteChatLID)
+	td.purgeByDefault = false
+
+	result, err := td.run(context.Background(), deleteChatPN, false, nil)
+
+	require.NoError(t, err)
+	assert.False(t, result.Purge)
+	assert.Empty(t, td.requests)
+}
+
+func TestDeleteChatPurgeNotRecordedSendsNothing(t *testing.T) {
+	td := newTestChatDeletion(deleteChatLID)
+	td.requestErr = errors.New("database is locked")
+
+	_, err := td.run(context.Background(), deleteChatPN, false, proto.Bool(false))
+
+	assert.Equal(t, codes.Internal, status.Code(err))
+	assert.Empty(t, td.sent)
 }
